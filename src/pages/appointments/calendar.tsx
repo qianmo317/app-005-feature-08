@@ -21,16 +21,25 @@ import {
   PlusOutlined,
   CalendarOutlined,
   ClockCircleOutlined,
-  DeleteOutlined,
+  CloseCircleOutlined,
   CheckCircleOutlined,
+  CheckOutlined,
+  RollbackOutlined,
+  HistoryOutlined,
   UserOutlined
 } from '@ant-design/icons';
 import Calendar from 'react-calendar';
 import { useSelector, useDispatch } from 'react-redux';
 import type { RootState } from '../../store';
-import { addAppointment, updateAppointment, deleteAppointment, addWaitList } from '../../store';
+import {
+  addAppointment,
+  changeAppointmentStatus,
+  completeAppointment,
+  voidServiceRecord,
+  addWaitList
+} from '../../store';
 import type { Appointment, WaitList } from '../../types';
-import { formatDate, formatTime, formatCurrency, generateId, getStatusText, getStatusColor } from '../../utils/format';
+import { formatDate, formatDateTime, formatTime, formatCurrency, generateId, getStatusText, getStatusColor } from '../../utils/format';
 import dayjs from 'dayjs';
 
 const AppointmentCalendar: React.FC = () => {
@@ -38,6 +47,7 @@ const AppointmentCalendar: React.FC = () => {
   const state = useSelector((state: RootState) => state.app);
   const [selectedDate, setSelectedDate] = useState(new Date());
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [historyAppointment, setHistoryAppointment] = useState<Appointment | null>(null);
   const [form] = Form.useForm();
 
   const selectedDateStr = dayjs(selectedDate).format('YYYY-MM-DD');
@@ -91,14 +101,14 @@ const AppointmentCalendar: React.FC = () => {
         startTime: startTime.toISOString(),
         endTime: endTime.toISOString(),
         duration,
-        status: 'confirmed',
+        status: 'pending',
         source: values.source,
         notes: values.notes || '',
         reminderSent: false,
       };
 
       const hasConflict = state.appointments.some((a) => {
-        if (a.employeeId !== values.employeeId || a.status === 'cancelled') return false;
+        if (a.employeeId !== values.employeeId || a.status === 'cancelled' || a.status === 'no_show') return false;
         const aStart = new Date(a.startTime).getTime();
         const aEnd = new Date(a.endTime).getTime();
         const newStart = startTime.valueOf();
@@ -137,23 +147,70 @@ const AppointmentCalendar: React.FC = () => {
     }
   };
 
-  const handleStatusChange = (appointment: Appointment, newStatus: string) => {
-    dispatch(
-      updateAppointment({
-        ...appointment,
-        status: newStatus as Appointment['status'],
-      })
-    );
-    message.success('状态更新成功');
+  const handleConfirm = (appointment: Appointment) => {
+    dispatch(changeAppointmentStatus({ id: appointment.id, toStatus: 'confirmed' }));
+    message.success('预约已确认');
   };
 
-  const handleDelete = (id: string) => {
+  const handleComplete = (appointment: Appointment) => {
+    const service = state.services.find((s) => s.id === appointment.serviceId);
     Modal.confirm({
-      title: '确认取消',
-      content: '确定要取消该预约吗？',
+      title: '完成服务',
+      content: `确认完成该预约？将按项目价格 ${formatCurrency(service?.price ?? 0)} 生成一条消费记录，计入 ${state.employees.find((e) => e.id === appointment.employeeId)?.name || '对应美容师'} 名下。`,
+      okText: '确认完成',
+      cancelText: '再想想',
       onOk: () => {
-        dispatch(deleteAppointment(id));
+        dispatch(completeAppointment(appointment.id));
+        message.success(`已完成，并生成消费记录 ${formatCurrency(service?.price ?? 0)}`);
+      },
+    });
+  };
+
+  const handleNoShow = (appointment: Appointment) => {
+    Modal.confirm({
+      title: '标记爽约',
+      content: '顾客未到店且未提前取消？爽约会单独计入顾客的到店率统计。',
+      okText: '标记爽约',
+      okButtonProps: { danger: true },
+      cancelText: '取消',
+      onOk: () => {
+        dispatch(changeAppointmentStatus({ id: appointment.id, toStatus: 'no_show' }));
+        message.success('已标记为爽约');
+      },
+    });
+  };
+
+  const handleCancel = (appointment: Appointment) => {
+    Modal.confirm({
+      title: '取消预约',
+      content: '确定要取消该预约吗？取消记录会保留并计入顾客的取消统计。',
+      okText: '取消预约',
+      okButtonProps: { danger: true },
+      cancelText: '返回',
+      onOk: () => {
+        dispatch(changeAppointmentStatus({ id: appointment.id, toStatus: 'cancelled' }));
         message.success('预约已取消');
+      },
+    });
+  };
+
+  const handleVoid = (appointment: Appointment) => {
+    const record = state.serviceRecords.find(
+      (r) => r.appointmentId === appointment.id && r.status !== 'voided'
+    );
+    if (!record) {
+      message.warning('未找到该预约对应的消费记录');
+      return;
+    }
+    Modal.confirm({
+      title: '作废消费记录',
+      content: `将作废消费记录 ${formatCurrency(record.price)}，会员累计消费与积分同步扣回，预约退回「已确认」。确定作废吗？`,
+      okText: '确认作废',
+      okButtonProps: { danger: true },
+      cancelText: '取消',
+      onOk: () => {
+        dispatch(voidServiceRecord(record.id));
+        message.success('消费记录已作废，预约已退回已确认');
       },
     });
   };
@@ -236,26 +293,69 @@ const AppointmentCalendar: React.FC = () => {
                         </Tag>
                       </Space>
                     </div>
-                    <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 8 }}>
-                      {appointment.status === 'confirmed' && (
-                        <Space>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 8 }}>
+                      <Button
+                        type="text"
+                        size="small"
+                        icon={<HistoryOutlined />}
+                        onClick={() => setHistoryAppointment(appointment)}
+                      >
+                        流转记录
+                      </Button>
+                      <Space size={0} wrap>
+                        {appointment.status === 'pending' && (
                           <Button
                             type="link"
                             size="small"
-                            onClick={() => handleStatusChange(appointment, 'completed')}
+                            icon={<CheckOutlined />}
+                            onClick={() => handleConfirm(appointment)}
                           >
-                            <CheckCircleOutlined /> 完成
+                            确认
                           </Button>
+                        )}
+                        {appointment.status === 'confirmed' && (
+                          <Button
+                            type="link"
+                            size="small"
+                            icon={<CheckCircleOutlined />}
+                            onClick={() => handleComplete(appointment)}
+                          >
+                            完成
+                          </Button>
+                        )}
+                        {(appointment.status === 'pending' || appointment.status === 'confirmed') && (
+                          <>
+                            <Button
+                              type="link"
+                              size="small"
+                              danger
+                              icon={<CloseCircleOutlined />}
+                              onClick={() => handleNoShow(appointment)}
+                            >
+                              爽约
+                            </Button>
+                            <Button
+                              type="link"
+                              size="small"
+                              danger
+                              onClick={() => handleCancel(appointment)}
+                            >
+                              取消
+                            </Button>
+                          </>
+                        )}
+                        {appointment.status === 'completed' && (
                           <Button
                             type="link"
                             size="small"
                             danger
-                            onClick={() => handleDelete(appointment.id)}
+                            icon={<RollbackOutlined />}
+                            onClick={() => handleVoid(appointment)}
                           >
-                            <DeleteOutlined /> 取消
+                            作废
                           </Button>
-                        </Space>
-                      )}
+                        )}
+                      </Space>
                     </div>
                   </div>
                 );
@@ -390,6 +490,46 @@ const AppointmentCalendar: React.FC = () => {
             <Input.TextArea rows={2} placeholder="请输入备注" />
           </Form.Item>
         </Form>
+      </Modal>
+
+      <Modal
+        title="预约流转记录"
+        open={!!historyAppointment}
+        onCancel={() => setHistoryAppointment(null)}
+        footer={null}
+        width={480}
+      >
+        {historyAppointment && (() => {
+          const logs = state.appointmentLogs
+            .filter((l) => l.appointmentId === historyAppointment.id)
+            .sort((a, b) => new Date(b.changedAt).getTime() - new Date(a.changedAt).getTime());
+          return logs.length > 0 ? (
+            <List
+              size="small"
+              dataSource={logs}
+              renderItem={(log) => (
+                <List.Item key={log.id}>
+                  <List.Item.Meta
+                    title={
+                      <Space size={4}>
+                        {log.fromStatus && (
+                          <>
+                            <Tag color={getStatusColor(log.fromStatus)}>{getStatusText(log.fromStatus)}</Tag>
+                            <span style={{ color: '#8c8c8c' }}>→</span>
+                          </>
+                        )}
+                        <Tag color={getStatusColor(log.toStatus)}>{getStatusText(log.toStatus)}</Tag>
+                      </Space>
+                    }
+                    description={`${formatDateTime(log.changedAt)} · ${log.note}`}
+                  />
+                </List.Item>
+              )}
+            />
+          ) : (
+            <div className="empty-state">暂无流转记录</div>
+          );
+        })()}
       </Modal>
     </div>
   );

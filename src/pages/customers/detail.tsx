@@ -35,7 +35,8 @@ import {
   addSkinAnalysis,
   addAllergy,
   updateAllergy,
-  deleteAllergy
+  deleteAllergy,
+  voidServiceRecord
 } from '../../store';
 import type { SkinAnalysis, Allergy } from '../../types';
 import { formatDate, formatCurrency, generateId, getStatusText } from '../../utils/format';
@@ -61,15 +62,25 @@ const CustomerDetail: React.FC = () => {
   const serviceRecords = state.serviceRecords
     .filter((r) => r.customerId === id)
     .sort((a, b) => new Date(b.serviceDate).getTime() - new Date(a.serviceDate).getTime());
+  const activeRecords = serviceRecords.filter((r) => r.status !== 'voided');
   const appointments = state.appointments
     .filter((a) => a.customerId === id)
     .sort((a, b) => new Date(b.startTime).getTime() - new Date(a.startTime).getTime());
+
+  // 到店率：爽约计为未到店，取消单独统计不计入分母
+  const completedCount = appointments.filter((a) => a.status === 'completed').length;
+  const noShowCount = appointments.filter((a) => a.status === 'no_show').length;
+  const cancelledCount = appointments.filter((a) => a.status === 'cancelled').length;
+  const attendanceRate =
+    completedCount + noShowCount > 0
+      ? Math.round((completedCount / (completedCount + noShowCount)) * 100)
+      : null;
 
   if (!customer) {
     return <div className="empty-state">顾客不存在</div>;
   }
 
-  const consumptionCategories = serviceRecords.reduce((acc, record) => {
+  const consumptionCategories = activeRecords.reduce((acc, record) => {
     const service = state.services.find((s) => s.id === record.serviceId);
     if (service) {
       acc[service.category] = (acc[service.category] || 0) + record.price;
@@ -187,6 +198,20 @@ const CustomerDetail: React.FC = () => {
       onOk: () => {
         dispatch(deleteAllergy(allergyId));
         message.success('删除成功');
+      },
+    });
+  };
+
+  const handleVoidRecord = (recordId: string, price: number) => {
+    Modal.confirm({
+      title: '作废消费记录',
+      content: `将作废消费记录 ${formatCurrency(price)}，会员累计消费与积分同步扣回，关联预约退回「已确认」。确定作废吗？`,
+      okText: '确认作废',
+      okButtonProps: { danger: true },
+      cancelText: '取消',
+      onOk: () => {
+        dispatch(voidServiceRecord(recordId));
+        message.success('消费记录已作废');
       },
     });
   };
@@ -402,21 +427,21 @@ const CustomerDetail: React.FC = () => {
                   <Card className="card-wrapper" title="消费统计">
                     <Descriptions column={1}>
                       <Descriptions.Item label="总消费次数">
-                        {serviceRecords.length} 次
+                        {activeRecords.length} 次
                       </Descriptions.Item>
                       <Descriptions.Item label="总消费金额">
                         {formatCurrency(membership?.totalSpent || 0)}
                       </Descriptions.Item>
                       <Descriptions.Item label="平均消费">
                         {formatCurrency(
-                          serviceRecords.length > 0
-                            ? (membership?.totalSpent || 0) / serviceRecords.length
+                          activeRecords.length > 0
+                            ? (membership?.totalSpent || 0) / activeRecords.length
                             : 0
                         )}
                       </Descriptions.Item>
                       <Descriptions.Item label="最近消费">
-                        {serviceRecords.length > 0
-                          ? formatDate(serviceRecords[0].serviceDate)
+                        {activeRecords.length > 0
+                          ? formatDate(activeRecords[0].serviceDate)
                           : '-'}
                       </Descriptions.Item>
                     </Descriptions>
@@ -434,14 +459,31 @@ const CustomerDetail: React.FC = () => {
                   serviceRecords.map((record) => {
                     const service = state.services.find((s) => s.id === record.serviceId);
                     const employee = state.employees.find((e) => e.id === record.employeeId);
+                    const voided = record.status === 'voided';
                     return (
-                      <div key={record.id} className="timeline-item">
+                      <div key={record.id} className="timeline-item" style={voided ? { opacity: 0.55 } : undefined}>
                         <div className="timeline-item-date">{formatDate(record.serviceDate)}</div>
                         <div className="timeline-item-content">
                           <Space>
-                            <span style={{ fontWeight: 500 }}>{service?.name || '未知项目'}</span>
+                            <span style={{ fontWeight: 500, textDecoration: voided ? 'line-through' : undefined }}>
+                              {service?.name || '未知项目'}
+                            </span>
                             <Tag color="blue">{employee?.name || '未知'}</Tag>
                             <span style={{ color: '#C9A86C' }}>{formatCurrency(record.price)}</span>
+                            {voided ? (
+                              <Tag color="red">已作废</Tag>
+                            ) : (
+                              record.appointmentId && (
+                                <Button
+                                  type="link"
+                                  size="small"
+                                  danger
+                                  onClick={() => handleVoidRecord(record.id, record.price)}
+                                >
+                                  作废
+                                </Button>
+                              )
+                            )}
                           </Space>
                           {record.notes && (
                             <div style={{ fontSize: 12, color: '#8c8c8c', marginTop: 4 }}>
@@ -463,6 +505,34 @@ const CustomerDetail: React.FC = () => {
             label: '预约记录',
             children: (
               <Card className="card-wrapper" title="预约记录">
+                <Row gutter={16} style={{ marginBottom: 16 }}>
+                  <Col xs={12} sm={6}>
+                    <div style={{ textAlign: 'center', padding: 12, background: '#FAFAFA', borderRadius: 8 }}>
+                      <div style={{ fontSize: 12, color: '#8c8c8c' }}>到店率</div>
+                      <div style={{ fontSize: 20, fontWeight: 600, color: '#C9A86C' }}>
+                        {attendanceRate !== null ? `${attendanceRate}%` : '-'}
+                      </div>
+                    </div>
+                  </Col>
+                  <Col xs={12} sm={6}>
+                    <div style={{ textAlign: 'center', padding: 12, background: '#FAFAFA', borderRadius: 8 }}>
+                      <div style={{ fontSize: 12, color: '#8c8c8c' }}>完成</div>
+                      <div style={{ fontSize: 20, fontWeight: 600, color: '#52c41a' }}>{completedCount}</div>
+                    </div>
+                  </Col>
+                  <Col xs={12} sm={6}>
+                    <div style={{ textAlign: 'center', padding: 12, background: '#FAFAFA', borderRadius: 8 }}>
+                      <div style={{ fontSize: 12, color: '#8c8c8c' }}>爽约</div>
+                      <div style={{ fontSize: 20, fontWeight: 600, color: '#ff4d4f' }}>{noShowCount}</div>
+                    </div>
+                  </Col>
+                  <Col xs={12} sm={6}>
+                    <div style={{ textAlign: 'center', padding: 12, background: '#FAFAFA', borderRadius: 8 }}>
+                      <div style={{ fontSize: 12, color: '#8c8c8c' }}>取消</div>
+                      <div style={{ fontSize: 20, fontWeight: 600, color: '#8c8c8c' }}>{cancelledCount}</div>
+                    </div>
+                  </Col>
+                </Row>
                 {appointments.length > 0 ? (
                   <List
                     dataSource={appointments}

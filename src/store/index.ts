@@ -10,6 +10,7 @@ import type {
   PackageItem,
   Employee,
   Appointment,
+  AppointmentStatusLog,
   ServiceRecord,
   Schedule,
   Review,
@@ -17,6 +18,7 @@ import type {
   Commission,
   WaitList
 } from '../types';
+import { generateId } from '../utils/format';
 import {
   mockCustomers,
   mockSkinAnalyses,
@@ -45,6 +47,7 @@ interface AppState {
   packageItems: PackageItem[];
   employees: Employee[];
   appointments: Appointment[];
+  appointmentLogs: AppointmentStatusLog[];
   serviceRecords: ServiceRecord[];
   schedules: Schedule[];
   reviews: Review[];
@@ -66,7 +69,7 @@ const loadState = (): AppState => {
         const b64 = firstCustomer.avatar.replace('data:image/svg+xml;base64,', '');
         try {
           atob(b64);
-          return saved;
+          return { ...saved, appointmentLogs: saved.appointmentLogs ?? [] };
         } catch (e) {
           console.log('Detected corrupted data, regenerating...');
           storage.clear();
@@ -95,6 +98,7 @@ const loadState = (): AppState => {
     packageItems: mockPackageItems(packages),
     employees,
     appointments: mockAppointments(customerIds, serviceIds, employeeIds),
+    appointmentLogs: [],
     serviceRecords: mockServiceRecords(customerIds, serviceIds, employeeIds),
     schedules: mockSchedules(employeeIds),
     reviews: mockReviews(customerIds, employeeIds, serviceIds),
@@ -109,6 +113,67 @@ const initialState: AppState = loadState();
 
 const saveState = (state: AppState) => {
   storage.set(STORAGE_KEY, state);
+};
+
+// 预约状态机：每种状态允许流转到的目标状态
+// completed 不允许直接流转，只能由 voidServiceRecord 作废消费记录时连带退回
+const ALLOWED_TRANSITIONS: Record<Appointment['status'], Appointment['status'][]> = {
+  pending: ['confirmed', 'cancelled', 'no_show'],
+  confirmed: ['completed', 'cancelled', 'no_show'],
+  completed: [],
+  cancelled: [],
+  no_show: []
+};
+
+const STATUS_NOTES: Record<Appointment['status'], string> = {
+  pending: '创建预约',
+  confirmed: '确认预约',
+  completed: '服务完成',
+  cancelled: '取消预约',
+  no_show: '标记爽约'
+};
+
+const recalcMembershipLevel = (membership: Membership) => {
+  if (membership.totalSpent > 30000) membership.level = 'diamond';
+  else if (membership.totalSpent > 20000) membership.level = 'platinum';
+  else if (membership.totalSpent > 10000) membership.level = 'gold';
+  else if (membership.totalSpent > 5000) membership.level = 'silver';
+  else membership.level = 'bronze';
+};
+
+const applyRecordToMembership = (state: AppState, record: ServiceRecord) => {
+  const membership = state.memberships.find(m => m.customerId === record.customerId);
+  if (membership) {
+    membership.totalSpent += record.price;
+    membership.points += Math.floor(record.price / 10);
+    recalcMembershipLevel(membership);
+  }
+};
+
+const rollbackRecordFromMembership = (state: AppState, record: ServiceRecord) => {
+  const membership = state.memberships.find(m => m.customerId === record.customerId);
+  if (membership) {
+    membership.totalSpent = Math.max(0, membership.totalSpent - record.price);
+    membership.points = Math.max(0, membership.points - Math.floor(record.price / 10));
+    recalcMembershipLevel(membership);
+  }
+};
+
+const pushAppointmentLog = (
+  state: AppState,
+  appointmentId: string,
+  fromStatus: Appointment['status'] | null,
+  toStatus: Appointment['status'],
+  note?: string
+) => {
+  state.appointmentLogs.unshift({
+    id: generateId(),
+    appointmentId,
+    fromStatus,
+    toStatus,
+    changedAt: new Date().toISOString(),
+    note: note || STATUS_NOTES[toStatus]
+  });
 };
 
 const appSlice = createSlice({
@@ -177,6 +242,74 @@ const appSlice = createSlice({
     },
     addAppointment: (state, action: PayloadAction<Appointment>) => {
       state.appointments.unshift(action.payload);
+      pushAppointmentLog(state, action.payload.id, null, action.payload.status);
+      saveState(state);
+    },
+    changeAppointmentStatus: (
+      state,
+      action: PayloadAction<{ id: string; toStatus: Appointment['status']; note?: string }>
+    ) => {
+      const appointment = state.appointments.find(a => a.id === action.payload.id);
+      if (!appointment) return;
+      const fromStatus = appointment.status;
+      const toStatus = action.payload.toStatus;
+      if (fromStatus === toStatus) return;
+      if (!ALLOWED_TRANSITIONS[fromStatus].includes(toStatus)) return;
+      appointment.status = toStatus;
+      pushAppointmentLog(state, appointment.id, fromStatus, toStatus, action.payload.note);
+      saveState(state);
+    },
+    completeAppointment: (state, action: PayloadAction<string>) => {
+      const appointment = state.appointments.find(a => a.id === action.payload);
+      if (!appointment) return;
+      // 同一单不能重复完成、重复生成消费记录
+      if (appointment.status === 'completed') return;
+      if (!ALLOWED_TRANSITIONS[appointment.status].includes('completed')) return;
+      const existing = state.serviceRecords.find(
+        r => r.appointmentId === appointment.id && r.status !== 'voided'
+      );
+      if (existing) return;
+
+      const fromStatus = appointment.status;
+      appointment.status = 'completed';
+      pushAppointmentLog(state, appointment.id, fromStatus, 'completed');
+
+      const service = state.services.find(s => s.id === appointment.serviceId);
+      const record: ServiceRecord = {
+        id: generateId(),
+        customerId: appointment.customerId,
+        serviceId: appointment.serviceId,
+        employeeId: appointment.employeeId,
+        serviceDate: new Date().toISOString(),
+        price: service?.price ?? 0,
+        notes: appointment.notes || '',
+        appointmentId: appointment.id,
+        status: 'active'
+      };
+      state.serviceRecords.unshift(record);
+      applyRecordToMembership(state, record);
+      saveState(state);
+    },
+    voidServiceRecord: (state, action: PayloadAction<string>) => {
+      const record = state.serviceRecords.find(r => r.id === action.payload);
+      if (!record || record.status === 'voided') return;
+      record.status = 'voided';
+      record.voidedAt = new Date().toISOString();
+      rollbackRecordFromMembership(state, record);
+      // 作废消费记录时，关联预约一起退回已确认
+      if (record.appointmentId) {
+        const appointment = state.appointments.find(a => a.id === record.appointmentId);
+        if (appointment && appointment.status === 'completed') {
+          appointment.status = 'confirmed';
+          pushAppointmentLog(
+            state,
+            appointment.id,
+            'completed',
+            'confirmed',
+            '消费记录作废，预约退回已确认'
+          );
+        }
+      }
       saveState(state);
     },
     updateAppointment: (state, action: PayloadAction<Appointment>) => {
@@ -227,15 +360,7 @@ const appSlice = createSlice({
     },
     addServiceRecord: (state, action: PayloadAction<ServiceRecord>) => {
       state.serviceRecords.unshift(action.payload);
-      const membership = state.memberships.find(m => m.customerId === action.payload.customerId);
-      if (membership) {
-        membership.totalSpent += action.payload.price;
-        membership.points += Math.floor(action.payload.price / 10);
-        if (membership.totalSpent > 30000) membership.level = 'diamond';
-        else if (membership.totalSpent > 20000) membership.level = 'platinum';
-        else if (membership.totalSpent > 10000) membership.level = 'gold';
-        else if (membership.totalSpent > 5000) membership.level = 'silver';
-      }
+      applyRecordToMembership(state, action.payload);
       saveState(state);
     }
   }
@@ -255,6 +380,9 @@ export const {
   addPackage,
   updatePackage,
   addAppointment,
+  changeAppointmentStatus,
+  completeAppointment,
+  voidServiceRecord,
   updateAppointment,
   deleteAppointment,
   addEmployee,
