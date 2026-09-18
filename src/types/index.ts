@@ -42,6 +42,9 @@ export interface ServiceRecord {
   serviceDate: string;
   price: number;
   notes: string;
+  appointmentId?: string;
+  voided?: boolean;
+  voidedAt?: string;
 }
 
 export interface Membership {
@@ -97,6 +100,14 @@ export interface Appointment {
   source: 'phone' | 'wechat' | 'walk_in' | 'online';
   notes: string;
   reminderSent: boolean;
+  statusHistory?: AppointmentStatusLog[];
+}
+
+export interface AppointmentStatusLog {
+  from: Appointment['status'];
+  to: Appointment['status'];
+  changedAt: string;
+  note?: string;
 }
 
 export interface WaitList {

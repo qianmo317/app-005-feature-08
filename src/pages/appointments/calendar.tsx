@@ -21,16 +21,21 @@ import {
   PlusOutlined,
   CalendarOutlined,
   ClockCircleOutlined,
-  DeleteOutlined,
+  CloseOutlined,
+  CheckOutlined,
   CheckCircleOutlined,
+  FrownOutlined,
+  HistoryOutlined,
+  RollbackOutlined,
   UserOutlined
 } from '@ant-design/icons';
 import Calendar from 'react-calendar';
 import { useSelector, useDispatch } from 'react-redux';
 import type { RootState } from '../../store';
-import { addAppointment, updateAppointment, deleteAppointment, addWaitList } from '../../store';
+import { addAppointment, changeAppointmentStatus, voidServiceRecord, addWaitList } from '../../store';
 import type { Appointment, WaitList } from '../../types';
 import { formatDate, formatTime, formatCurrency, generateId, getStatusText, getStatusColor } from '../../utils/format';
+import AppointmentStatusHistory from '../../components/AppointmentStatusHistory';
 import dayjs from 'dayjs';
 
 const AppointmentCalendar: React.FC = () => {
@@ -38,6 +43,7 @@ const AppointmentCalendar: React.FC = () => {
   const state = useSelector((state: RootState) => state.app);
   const [selectedDate, setSelectedDate] = useState(new Date());
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [historyAppointment, setHistoryAppointment] = useState<Appointment | null>(null);
   const [form] = Form.useForm();
 
   const selectedDateStr = dayjs(selectedDate).format('YYYY-MM-DD');
@@ -137,23 +143,54 @@ const AppointmentCalendar: React.FC = () => {
     }
   };
 
-  const handleStatusChange = (appointment: Appointment, newStatus: string) => {
-    dispatch(
-      updateAppointment({
-        ...appointment,
-        status: newStatus as Appointment['status'],
-      })
-    );
-    message.success('状态更新成功');
+  const handleStatusChange = (appointment: Appointment, newStatus: Appointment['status']) => {
+    dispatch(changeAppointmentStatus({ id: appointment.id, status: newStatus }));
+    if (newStatus === 'completed') {
+      message.success('已完成，消费记录已生成');
+    } else {
+      message.success('状态更新成功');
+    }
   };
 
-  const handleDelete = (id: string) => {
+  const handleCancel = (appointment: Appointment) => {
     Modal.confirm({
-      title: '确认取消',
-      content: '确定要取消该预约吗？',
+      title: '取消预约',
+      content: '确定要取消该预约吗？取消后不可恢复，将计入顾客到店率统计。',
+      okText: '确认取消',
+      okButtonProps: { danger: true },
+      cancelText: '再想想',
+      onOk: () => handleStatusChange(appointment, 'cancelled'),
+    });
+  };
+
+  const handleNoShow = (appointment: Appointment) => {
+    Modal.confirm({
+      title: '标记爽约',
+      content: '确定顾客未到店爽约吗？标记后不可恢复，将计入顾客到店率统计。',
+      okText: '确认爽约',
+      okButtonProps: { danger: true },
+      cancelText: '再想想',
+      onOk: () => handleStatusChange(appointment, 'no_show'),
+    });
+  };
+
+  const handleVoid = (appointment: Appointment) => {
+    const record = state.serviceRecords.find(
+      (r) => r.appointmentId === appointment.id && !r.voided
+    );
+    if (!record) {
+      message.warning('该预约暂无有效消费记录');
+      return;
+    }
+    Modal.confirm({
+      title: '作废消费记录',
+      content: `将作废 ${formatCurrency(record.price)} 的消费记录，会员累计消费同步回退，预约退回已确认状态。确定继续吗？`,
+      okText: '确认作废',
+      okButtonProps: { danger: true },
+      cancelText: '再想想',
       onOk: () => {
-        dispatch(deleteAppointment(id));
-        message.success('预约已取消');
+        dispatch(voidServiceRecord(record.id));
+        message.success('消费记录已作废，预约已退回已确认');
       },
     });
   };
@@ -237,25 +274,84 @@ const AppointmentCalendar: React.FC = () => {
                       </Space>
                     </div>
                     <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 8 }}>
-                      {appointment.status === 'confirmed' && (
-                        <Space>
+                      <Space size={0} wrap>
+                        {appointment.status === 'pending' && (
+                          <>
+                            <Button
+                              type="link"
+                              size="small"
+                              onClick={() => handleStatusChange(appointment, 'confirmed')}
+                            >
+                              <CheckOutlined /> 确认
+                            </Button>
+                            <Button
+                              type="link"
+                              size="small"
+                              danger
+                              onClick={() => handleNoShow(appointment)}
+                            >
+                              <FrownOutlined /> 爽约
+                            </Button>
+                            <Button
+                              type="link"
+                              size="small"
+                              danger
+                              onClick={() => handleCancel(appointment)}
+                            >
+                              <CloseOutlined /> 取消
+                            </Button>
+                          </>
+                        )}
+                        {appointment.status === 'confirmed' && (
+                          <>
+                            <Button
+                              type="link"
+                              size="small"
+                              onClick={() => handleStatusChange(appointment, 'completed')}
+                            >
+                              <CheckCircleOutlined /> 完成
+                            </Button>
+                            <Button
+                              type="link"
+                              size="small"
+                              danger
+                              onClick={() => handleNoShow(appointment)}
+                            >
+                              <FrownOutlined /> 爽约
+                            </Button>
+                            <Button
+                              type="link"
+                              size="small"
+                              danger
+                              onClick={() => handleCancel(appointment)}
+                            >
+                              <CloseOutlined /> 取消
+                            </Button>
+                          </>
+                        )}
+                        {appointment.status === 'completed' &&
+                          state.serviceRecords.some(
+                            (r) => r.appointmentId === appointment.id && !r.voided
+                          ) && (
+                            <Button
+                              type="link"
+                              size="small"
+                              danger
+                              onClick={() => handleVoid(appointment)}
+                            >
+                              <RollbackOutlined /> 作废
+                            </Button>
+                          )}
+                        {(appointment.statusHistory?.length ?? 0) > 0 && (
                           <Button
                             type="link"
                             size="small"
-                            onClick={() => handleStatusChange(appointment, 'completed')}
+                            onClick={() => setHistoryAppointment(appointment)}
                           >
-                            <CheckCircleOutlined /> 完成
+                            <HistoryOutlined /> 记录
                           </Button>
-                          <Button
-                            type="link"
-                            size="small"
-                            danger
-                            onClick={() => handleDelete(appointment.id)}
-                          >
-                            <DeleteOutlined /> 取消
-                          </Button>
-                        </Space>
-                      )}
+                        )}
+                      </Space>
                     </div>
                   </div>
                 );
@@ -391,6 +487,11 @@ const AppointmentCalendar: React.FC = () => {
           </Form.Item>
         </Form>
       </Modal>
+
+      <AppointmentStatusHistory
+        appointment={historyAppointment}
+        onClose={() => setHistoryAppointment(null)}
+      />
     </div>
   );
 };

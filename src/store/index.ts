@@ -1,5 +1,6 @@
 import { configureStore, createSlice, PayloadAction, combineReducers } from '@reduxjs/toolkit';
 import { storage } from '../utils/storage';
+import { generateId } from '../utils/format';
 import type {
   Customer,
   SkinAnalysis,
@@ -55,6 +56,23 @@ interface AppState {
 }
 
 const STORAGE_KEY = 'app_state';
+
+// 预约状态机：待确认/已确认可流转，已完成只能经由作废消费记录退回，已取消与爽约为终态
+const ALLOWED_TRANSITIONS: Record<Appointment['status'], Appointment['status'][]> = {
+  pending: ['confirmed', 'cancelled', 'no_show'],
+  confirmed: ['completed', 'cancelled', 'no_show'],
+  completed: [],
+  cancelled: [],
+  no_show: []
+};
+
+const recalcMembershipLevel = (membership: Membership) => {
+  if (membership.totalSpent > 30000) membership.level = 'diamond';
+  else if (membership.totalSpent > 20000) membership.level = 'platinum';
+  else if (membership.totalSpent > 10000) membership.level = 'gold';
+  else if (membership.totalSpent > 5000) membership.level = 'silver';
+  else membership.level = 'bronze';
+};
 
 const loadState = (): AppState => {
   try {
@@ -231,10 +249,81 @@ const appSlice = createSlice({
       if (membership) {
         membership.totalSpent += action.payload.price;
         membership.points += Math.floor(action.payload.price / 10);
-        if (membership.totalSpent > 30000) membership.level = 'diamond';
-        else if (membership.totalSpent > 20000) membership.level = 'platinum';
-        else if (membership.totalSpent > 10000) membership.level = 'gold';
-        else if (membership.totalSpent > 5000) membership.level = 'silver';
+        recalcMembershipLevel(membership);
+      }
+      saveState(state);
+    },
+    changeAppointmentStatus: (state, action: PayloadAction<{ id: string; status: Appointment['status']; note?: string }>) => {
+      const appointment = state.appointments.find(a => a.id === action.payload.id);
+      if (!appointment) return;
+      const from = appointment.status;
+      const to = action.payload.status;
+      if (from === to || !ALLOWED_TRANSITIONS[from].includes(to)) return;
+
+      appointment.status = to;
+      appointment.statusHistory = [
+        ...(appointment.statusHistory ?? []),
+        { from, to, changedAt: new Date().toISOString(), note: action.payload.note }
+      ];
+
+      // 标记完成时按项目价格生成消费记录，落到预约对应的美容师名下；同一预约不重复生成
+      if (to === 'completed') {
+        const alreadyGenerated = state.serviceRecords.some(
+          r => r.appointmentId === appointment.id && !r.voided
+        );
+        if (!alreadyGenerated) {
+          const service = state.services.find(s => s.id === appointment.serviceId);
+          const record: ServiceRecord = {
+            id: generateId(),
+            customerId: appointment.customerId,
+            serviceId: appointment.serviceId,
+            employeeId: appointment.employeeId,
+            serviceDate: new Date().toISOString(),
+            price: service?.price ?? 0,
+            notes: '预约完成自动生成',
+            appointmentId: appointment.id
+          };
+          state.serviceRecords.unshift(record);
+          const membership = state.memberships.find(m => m.customerId === appointment.customerId);
+          if (membership) {
+            membership.totalSpent += record.price;
+            membership.points += Math.floor(record.price / 10);
+            recalcMembershipLevel(membership);
+          }
+        }
+      }
+      saveState(state);
+    },
+    voidServiceRecord: (state, action: PayloadAction<string>) => {
+      const record = state.serviceRecords.find(r => r.id === action.payload);
+      if (!record || record.voided) return;
+
+      record.voided = true;
+      record.voidedAt = new Date().toISOString();
+
+      // 回退会员累计消费与积分
+      const membership = state.memberships.find(m => m.customerId === record.customerId);
+      if (membership) {
+        membership.totalSpent = Math.max(0, membership.totalSpent - record.price);
+        membership.points = Math.max(0, membership.points - Math.floor(record.price / 10));
+        recalcMembershipLevel(membership);
+      }
+
+      // 连着预约一起退回已确认
+      if (record.appointmentId) {
+        const appointment = state.appointments.find(a => a.id === record.appointmentId);
+        if (appointment && appointment.status === 'completed') {
+          appointment.status = 'confirmed';
+          appointment.statusHistory = [
+            ...(appointment.statusHistory ?? []),
+            {
+              from: 'completed',
+              to: 'confirmed',
+              changedAt: new Date().toISOString(),
+              note: '消费记录作废，预约退回已确认'
+            }
+          ];
+        }
       }
       saveState(state);
     }
@@ -263,7 +352,9 @@ export const {
   addWaitList,
   updateWaitList,
   deleteWaitList,
-  addServiceRecord
+  addServiceRecord,
+  changeAppointmentStatus,
+  voidServiceRecord
 } = appSlice.actions;
 
 export const store = configureStore({

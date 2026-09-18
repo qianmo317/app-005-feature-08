@@ -25,7 +25,8 @@ import {
   EditOutlined,
   DeleteOutlined,
   ClockCircleOutlined,
-  CheckCircleOutlined
+  CheckCircleOutlined,
+  HistoryOutlined
 } from '@ant-design/icons';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useSelector, useDispatch } from 'react-redux';
@@ -35,10 +36,12 @@ import {
   addSkinAnalysis,
   addAllergy,
   updateAllergy,
-  deleteAllergy
+  deleteAllergy,
+  voidServiceRecord
 } from '../../store';
-import type { SkinAnalysis, Allergy } from '../../types';
+import type { SkinAnalysis, Allergy, Appointment } from '../../types';
 import { formatDate, formatCurrency, generateId, getStatusText } from '../../utils/format';
+import AppointmentStatusHistory from '../../components/AppointmentStatusHistory';
 import dayjs from 'dayjs';
 
 const CustomerDetail: React.FC = () => {
@@ -49,6 +52,7 @@ const CustomerDetail: React.FC = () => {
   const [skinAnalysisModal, setSkinAnalysisModal] = useState(false);
   const [allergyModal, setAllergyModal] = useState(false);
   const [editingAllergy, setEditingAllergy] = useState<Allergy | null>(null);
+  const [historyAppointment, setHistoryAppointment] = useState<Appointment | null>(null);
   const [skinForm] = Form.useForm();
   const [allergyForm] = Form.useForm();
 
@@ -61,15 +65,23 @@ const CustomerDetail: React.FC = () => {
   const serviceRecords = state.serviceRecords
     .filter((r) => r.customerId === id)
     .sort((a, b) => new Date(b.serviceDate).getTime() - new Date(a.serviceDate).getTime());
+  const validRecords = serviceRecords.filter((r) => !r.voided);
   const appointments = state.appointments
     .filter((a) => a.customerId === id)
     .sort((a, b) => new Date(b.startTime).getTime() - new Date(a.startTime).getTime());
+
+  // 到店率：爽约与取消分开计数，与完成数一起构成结算基数
+  const completedCount = appointments.filter((a) => a.status === 'completed').length;
+  const noShowCount = appointments.filter((a) => a.status === 'no_show').length;
+  const cancelledCount = appointments.filter((a) => a.status === 'cancelled').length;
+  const settledCount = completedCount + noShowCount + cancelledCount;
+  const visitRate = settledCount > 0 ? Math.round((completedCount / settledCount) * 100) : 0;
 
   if (!customer) {
     return <div className="empty-state">顾客不存在</div>;
   }
 
-  const consumptionCategories = serviceRecords.reduce((acc, record) => {
+  const consumptionCategories = validRecords.reduce((acc, record) => {
     const service = state.services.find((s) => s.id === record.serviceId);
     if (service) {
       acc[service.category] = (acc[service.category] || 0) + record.price;
@@ -191,6 +203,21 @@ const CustomerDetail: React.FC = () => {
     });
   };
 
+  const handleVoidRecord = (recordId: string) => {
+    const record = state.serviceRecords.find((r) => r.id === recordId);
+    Modal.confirm({
+      title: '作废消费记录',
+      content: `将作废 ${formatCurrency(record?.price || 0)} 的消费记录，会员累计消费同步回退，关联预约退回已确认状态。确定继续吗？`,
+      okText: '确认作废',
+      okButtonProps: { danger: true },
+      cancelText: '再想想',
+      onOk: () => {
+        dispatch(voidServiceRecord(recordId));
+        message.success('消费记录已作废');
+      },
+    });
+  };
+
   return (
     <div>
       <div className="page-header">
@@ -265,6 +292,38 @@ const CustomerDetail: React.FC = () => {
             </Col>
           </Row>
         )}
+        <Row gutter={16} style={{ marginTop: 16 }}>
+          <Col span={8}>
+            <div style={{ textAlign: 'center', padding: 16, background: '#FAFAFA', borderRadius: 8 }}>
+              <div style={{ fontSize: 12, color: '#8c8c8c' }}>到店率</div>
+              <div style={{ fontSize: 20, fontWeight: 600, color: '#C9A86C' }}>
+                {settledCount > 0 ? `${visitRate}%` : '-'}
+              </div>
+              <Progress
+                percent={visitRate}
+                showInfo={false}
+                strokeColor="#C9A86C"
+                size="small"
+              />
+            </div>
+          </Col>
+          <Col span={8}>
+            <div style={{ textAlign: 'center', padding: 16, background: '#FAFAFA', borderRadius: 8 }}>
+              <div style={{ fontSize: 12, color: '#8c8c8c' }}>爽约</div>
+              <div style={{ fontSize: 20, fontWeight: 600, color: '#ff4d4f' }}>
+                {noShowCount} 次
+              </div>
+            </div>
+          </Col>
+          <Col span={8}>
+            <div style={{ textAlign: 'center', padding: 16, background: '#FAFAFA', borderRadius: 8 }}>
+              <div style={{ fontSize: 12, color: '#8c8c8c' }}>取消</div>
+              <div style={{ fontSize: 20, fontWeight: 600, color: '#8c8c8c' }}>
+                {cancelledCount} 次
+              </div>
+            </div>
+          </Col>
+        </Row>
       </Card>
 
       <Tabs
@@ -402,21 +461,21 @@ const CustomerDetail: React.FC = () => {
                   <Card className="card-wrapper" title="消费统计">
                     <Descriptions column={1}>
                       <Descriptions.Item label="总消费次数">
-                        {serviceRecords.length} 次
+                        {validRecords.length} 次
                       </Descriptions.Item>
                       <Descriptions.Item label="总消费金额">
                         {formatCurrency(membership?.totalSpent || 0)}
                       </Descriptions.Item>
                       <Descriptions.Item label="平均消费">
                         {formatCurrency(
-                          serviceRecords.length > 0
-                            ? (membership?.totalSpent || 0) / serviceRecords.length
+                          validRecords.length > 0
+                            ? (membership?.totalSpent || 0) / validRecords.length
                             : 0
                         )}
                       </Descriptions.Item>
                       <Descriptions.Item label="最近消费">
-                        {serviceRecords.length > 0
-                          ? formatDate(serviceRecords[0].serviceDate)
+                        {validRecords.length > 0
+                          ? formatDate(validRecords[0].serviceDate)
                           : '-'}
                       </Descriptions.Item>
                     </Descriptions>
@@ -435,14 +494,42 @@ const CustomerDetail: React.FC = () => {
                     const service = state.services.find((s) => s.id === record.serviceId);
                     const employee = state.employees.find((e) => e.id === record.employeeId);
                     return (
-                      <div key={record.id} className="timeline-item">
+                      <div
+                        key={record.id}
+                        className="timeline-item"
+                        style={record.voided ? { opacity: 0.55 } : undefined}
+                      >
                         <div className="timeline-item-date">{formatDate(record.serviceDate)}</div>
                         <div className="timeline-item-content">
                           <Space>
-                            <span style={{ fontWeight: 500 }}>{service?.name || '未知项目'}</span>
+                            <span
+                              style={{
+                                fontWeight: 500,
+                                textDecoration: record.voided ? 'line-through' : 'none',
+                              }}
+                            >
+                              {service?.name || '未知项目'}
+                            </span>
                             <Tag color="blue">{employee?.name || '未知'}</Tag>
                             <span style={{ color: '#C9A86C' }}>{formatCurrency(record.price)}</span>
+                            {record.voided ? (
+                              <Tag>已作废</Tag>
+                            ) : (
+                              <Button
+                                type="link"
+                                size="small"
+                                danger
+                                onClick={() => handleVoidRecord(record.id)}
+                              >
+                                作废
+                              </Button>
+                            )}
                           </Space>
+                          {record.voided && record.voidedAt && (
+                            <div style={{ fontSize: 12, color: '#bfbfbf', marginTop: 4 }}>
+                              作废于 {formatDate(record.voidedAt, 'YYYY-MM-DD HH:mm')}
+                            </div>
+                          )}
                           {record.notes && (
                             <div style={{ fontSize: 12, color: '#8c8c8c', marginTop: 4 }}>
                               {record.notes}
@@ -470,7 +557,23 @@ const CustomerDetail: React.FC = () => {
                       const service = state.services.find((s) => s.id === item.serviceId);
                       const employee = state.employees.find((e) => e.id === item.employeeId);
                       return (
-                        <List.Item key={item.id}>
+                        <List.Item
+                          key={item.id}
+                          actions={
+                            (item.statusHistory?.length ?? 0) > 0
+                              ? [
+                                  <Button
+                                    type="link"
+                                    size="small"
+                                    icon={<HistoryOutlined />}
+                                    onClick={() => setHistoryAppointment(item)}
+                                  >
+                                    流转记录
+                                  </Button>,
+                                ]
+                              : undefined
+                          }
+                        >
                           <List.Item.Meta
                             avatar={<CheckCircleOutlined style={{ fontSize: 24, color: '#C9A86C' }} />}
                             title={
@@ -657,6 +760,11 @@ const CustomerDetail: React.FC = () => {
           </Form.Item>
         </Form>
       </Modal>
+
+      <AppointmentStatusHistory
+        appointment={historyAppointment}
+        onClose={() => setHistoryAppointment(null)}
+      />
     </div>
   );
 };

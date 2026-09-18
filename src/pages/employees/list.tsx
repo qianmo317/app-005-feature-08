@@ -89,7 +89,7 @@ const EmployeeList: React.FC = () => {
   };
 
   const getEmployeeStats = (employeeId: string) => {
-    const records = state.serviceRecords.filter((r) => r.employeeId === employeeId);
+    const records = state.serviceRecords.filter((r) => r.employeeId === employeeId && !r.voided);
     const totalRevenue = records.reduce((sum, r) => sum + r.price, 0);
     const totalCommission = state.commissions
       .filter((c) => c.employeeId === employeeId)

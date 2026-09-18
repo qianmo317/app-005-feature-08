@@ -19,10 +19,11 @@ const Dashboard: React.FC = () => {
   const today = new Date().toISOString().split('T')[0];
 
   const completedRecords = state.serviceRecords.filter(
-    (r) => r.serviceDate.split('T')[0] === today
+    (r) => !r.voided && r.serviceDate.split('T')[0] === today
   );
   const monthlyRevenue = state.serviceRecords
     .filter((r) => {
+      if (r.voided) return false;
       const recordDate = new Date(r.serviceDate);
       const now = new Date();
       return (
@@ -63,7 +64,7 @@ const Dashboard: React.FC = () => {
   const employeeStats = state.employees
     .filter((e) => e.role === 'beautician' || e.role === 'technician')
     .map((e) => {
-      const records = state.serviceRecords.filter((r) => r.employeeId === e.id);
+      const records = state.serviceRecords.filter((r) => r.employeeId === e.id && !r.voided);
       const revenue = records.reduce((sum, r) => sum + r.price, 0);
       return { name: e.name, value: revenue };
     })
@@ -75,7 +76,7 @@ const Dashboard: React.FC = () => {
     date.setDate(date.getDate() - (6 - i));
     const dateStr = date.toISOString().split('T')[0];
     const dayRevenue = state.serviceRecords
-      .filter((r) => r.serviceDate.split('T')[0] === dateStr)
+      .filter((r) => !r.voided && r.serviceDate.split('T')[0] === dateStr)
       .reduce((sum, r) => sum + r.price, 0);
     return {
       date: `${date.getMonth() + 1}/${date.getDate()}`,
